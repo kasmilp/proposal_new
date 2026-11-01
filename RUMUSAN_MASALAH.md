@@ -1,33 +1,102 @@
-# Rumusan Masalah Utama (Spesifik + Nilai Novelty)
+# Rumusan Masalah dan Novelty — Versi Algoritmik Device-Agnostic (Standar Tesis S2 / Publikasi)
 
-## Rumusan masalah (1 kalimat utama)
+## 1. Rumusan masalah umum (inti tesis, tanpa menyebut merek)
 
-> Bagaimana merancang mekanisme alokasi koneksi baru yang adaptif terhadap kualitas link heterogen FO–Starlink (`Q_FO(t)`, `Q_SL(t)`) dengan kendala bucket PCC integer (`n_FO + n_SL = D`), pinning sesi aktif (`SPR`), dan guard anti-oscillation konjungsif (`Δw`, `Tc`, `K_stable`), sehingga pada kondisi degradasi asimetris persentase koneksi baru yang salah jalan dan gangguan sesi menurun signifikan dibanding PCC statis, tanpa menimbulkan flapping konfigurasi pada kondisi fluktuasi bersamaan?
+> Bagaimana mengalokasikan flow baru pada N path heterogen dengan kualitas bursty dan berkorelasi waktu (`Q_i(t)`) ke dalam himpunan enforcement diskret berkapasitas terbatas, dengan kendala (i) flow lama tidak boleh dipindah kecuali path-nya gagal total, dan (ii) biaya perubahan konfigurasi tidak nol, sehingga utilitas kualitas agregat maksimal dengan jumlah perpindahan konfigurasi yang terbatas dan terjamin tidak berosilasi pada noise terbatas?
 
-## Mengapa rumusan ini spesifik (bukan umum)
+Instansiasi evaluasi (bukan inti kontribusi): `N=2` (FO stabil + Starlink LEO bursty), enforcement integer `n_1+n_2=D` (PCC MikroTik sebagai satu anggota kelas Weighted Bucket Enforcer seperti ECMP/WRR).
 
-- Objek: **koneksi baru** saja (`C_new`), bukan semua paket. Koneksi aktif (`C_active`) dikecualikan kecuali `FAILED`.
-- Input: skor kualitas multivariat kontinu `Q_i(t)` dari `L, J, P, Th, A` dengan smoothing EWMA.
-- Kendala keras: output harus integer `n_i` dengan `Σn_i = D` (PCC), bukan bobot kontinu bebas.
-- Constraint: `SPR` dipertahankan + frekuensi update dibatasi guard.
-- Kondisi uji: degradasi asimetris (satu ISP jelek) dan fluktuasi bersamaan (keduanya naik-turun).
-- Pembanding: PCC statis + varian ablasi (tanpa guard / linear / tanpa EWMA).
+## 2. Formalisasi matematika (masalah yang dipecahkan algoritma)
 
-## Nilai novelty yang terkunci di rumusan ini
+Keadaan tiap path `i` pada siklus `t`:
 
-1. **FSM 3-state dengan aksi berbeda** (`NORMAL` bagi proporsional, `DEGRADED` tekan new-conn tapi tahan active, `FAILED` baru failover) — bukan failover biner.
-2. **Alokasi non-linear** `W = max(0, Q − Q_min)^γ` — menekan ISP jelek lebih agresif daripada proporsional linear, dengan `γ` dan `Q_min` yang diuji sensitivitasnya.
-3. **Guard konjungsif tiga syarat** (`Δw` + `Tc` + `K_stable`) — update PCC hanya jika ketiganya lolos, sehingga ada tradeoff terukur antara kecepatan deteksi dan stabilitas.
-4. **Kuantisasi sadar-error** `n = round(w·D)` dengan `n_min` + laporan error `|n/D − w|` untuk tiap `D` — jembatan core generik ke PCC spesifik.
-5. **SPR sebagai constraint optimasi**, bukan metrik tambahan — adaptif tidak boleh merusak sesi lama.
+```
+Q_i(t) in [0,1]   : kualitas komposit hasil LQA ( Bagian 3 )
+V_i(t) >= 0       : indeks ketidakstabilan (variance-based, Bagian N1)
+s_i(t)            : NORMAL / DEGRADED / FAILED ( Bagian N2 )
+```
 
-## Kriteria jawaban dinyatakan berhasil (falsifiable)
+Keputusan: bobot kontinu `w(t)` di simplex, lalu peta diskret `n(t)` milik enforcer.
 
-Rumusan dinyatakan terjawab jika dan hanya jika, pada ≥10 repetisi per skenario dengan CI95%:
+```
+w(t) = argmax  Σ_i w_i · U_i(t)  −  λ · C_sw(w, w_old)  −  μ · E_q(w, n)
+s.t. Σw = 1, w >= 0, n = Π(w), Σn = D, n integer
+```
 
-1. Di S2–S6 (degradasi/putus satu sisi): `% new-conn salah jalan` dan `sesi terganggu` QASPA < PCC statis secara signifikan, `SPR > 0.95` (kecuali sisi FAILED).
-2. Di S1 (normal): QoS agregat QASPA imbang dengan PCC (tidak lebih buruk signifikan) dan `flap ≈ 0`.
-3. Di S7 (fluktuasi bersamaan): `flap/jam` dan `rewrite/jam` QASPA dengan guard jauh < QASPA tanpa guard, dengan tambahan detection delay yang terukur dan dilaporkan.
-4. Ablasi menunjukkan tiap komponen (EWMA, `γ>1`, guard, pemisahan DEGRADED/FAILED) berkontribusi pada metrik berbeda — bukan tempelan.
+dengan `U_i` utilitas adaptif, `C_sw` biaya switching, `E_q` error kuantisasi, `Π` operator proyeksi enforcer. Kontribusi ada pada bentuk `U`, `s`, dan syarat update — bukan pada solver umum.
 
-Jika salah satu gagal, klaim novelty gugur sebagian dan harus dilaporkan jujur sebagai batasan.
+## 3. Novelty matematika (modifikasi, bukan sekadar memakai)
+
+### N1. Utilitas sadar-stabilitas (stability-aware utility) — REPARASI atas weighted-sum statis
+
+Weighted-sum klasik `Q = Σ c_k·q_k` dengan bobot tetap gagal pada LEO: metrik yang paling bergejolak justru paling menentukan ranking sesaat.
+
+Perbaikan:
+
+```
+V_i(t) = Var_W(Q_i) / (Mean_W(Q_i) + ε)     # koefisien variasi pada jendela W
+S_i(t) = 1 / (1 + κ·V_i(t))                  # faktor stabilitas, κ>0
+U_i(t) = S_i(t) · max(0, Q_i(t) − Q_min)^γ
+w_i    = U_i / Σ_j U_j
+```
+
+Sifat yang diklaim dan diuji: (a) path bursty didiskon otomatis walau mean `Q` tinggi; (b) pada `V→0` kembali ke alokasi proporsional kualitas; (c) `κ, γ` diuji sensitivitas, bukan konstanta ajaib. Inilah reparasi matematis pertama.
+
+### N2. FSM 3-state dengan threshold adaptif (bukan threshold tetap)
+
+Threshold tetap `0.55/0.65` adalah tuning testbed. Perbaikan: threshold mengikuti statistik baseline bergerak.
+
+```
+m_i(t) = mean_W(Q_i),  σ_i(t) = std_W(Q_i)
+Tau_low_i(t)  = max(Tau_abs_low,  m_i − a·σ_i)
+Tau_high_i(t) = min(Tau_abs_high, m_i − b·σ_i + h),  h>0 hysteresis gap
+aturan: NORMAL→DEGRADED jika Q < Tau_low K_deg kali; pulih hanya jika Q > Tau_high K_rec kali
+FAILED hanya via A_i=0 K_fail kali (jalur keras terpisah)
+```
+
+Nilai kebaruan: ambang mengikuti rezim tiap path (siang/malam, cuaca), sehingga klaim tidak overfit satu angka. `a,b,h` dilaporkan + diablasi.
+
+### N3. Guard konjungsif dengan jaminan terbatas (bounded switching)
+
+Guard tunggal (cooldown saja) sudah umum. Perbaikan: tiga syarat konjungsif yang memberi bound keras.
+
+```
+update(t) =  [max|w_new − w_old| > δw] ∧ [t − t_last > Tc] ∧ [s stabil K_stable siklus]
+```
+
+Jaminan yang dibuktikan (bukan klaim): untuk noise `|Q(t)−Q(t−1)| ≤ η`, frekuensi update ≤ `3600/Tc` per jam apa pun yang terjadi, dan tidak ada update pada osilasi amplitudo `< δw/(L·η)` dengan `L` konstanta Lipschitz pemetaan `Q→w`. Kurva tradeoff `δw,Tc` vs detection delay vs flap diukur — inilah yang membuat C5 menjadi hasil, bukan parameter.
+
+### N4. Proyeksi kuantisasi sadar-error dengan bound
+
+`round(w·D)` sudah umum. Perbaikan: proyeksi dengan proteksi minimum + bound eksplisit.
+
+```
+n = Π(w): n_1 = round(w_1·D), n_2 = D − n_1, n_i ≥ n_min kecuali FAILED
+bound: |n_i/D − w_i| ≤ 1/(2D) + 1[D ganjil dan w≈0.5]
+```
+
+Implikasi: pemilihan `D` bukan selera — tesis memberi tabel error vs granularitas vs jumlah rule `O(D)`, dan menunjukkan kapan `D=10` cukup dan kapan perlu `D=20`. Berlaku untuk kelas enforcer apa pun (`Π` diganti ECMP/WRR tanpa ubah N1–N3).
+
+## 4. Mengapa ini bukan "algoritma dipakai begitu saja"
+
+| Algoritma dasar yang dipakai | Reparasi pada penelitian ini | Bukti yang dituntut |
+|---|---|---|
+| EWMA + weighted sum | Bobot dikali faktor stabilitas `S_i(V_i)` + threshold adaptif `m±kσ` | Ablasi tanpa `S_i` vs dengan `S_i` pada S7; sensitivitas `κ` |
+| Threshold failover | FSM 3-state aksi beda + hysteresis gap `h` | DEGRADED vs FAILED punya distribusi dan aksi optimal berbeda |
+| WRR proporsional | Supresi non-linear `γ` + `Q_min` | `γ=1` vs `γ>1`: % new-flow salah jalan |
+| Cooldown | Guard 3-syarat + bound switching + kurva tradeoff | Tanpa guard vs dengan guard: flap/jam vs delay |
+| round() | Proyeksi `Π` + bound error + analisis `D` | Error kuantisasi vs distribusi aktual |
+
+Setiap baris punya persamaan yang diubah + eksperimen yang menggugurkannya. Tanpa keduanya, novelty gugur.
+
+## 5. Kriteria keberhasilan (falsifiable, untuk publikasi)
+
+Pada ≥10 repetisi/skenario, CI95%, baselines {statis, threshold-failover, SAW/MCDM sederhana}:
+
+1. S2–S6: utilitas agregat dan % flow salah jalan lebih baik signifikan; `SPR > 0.95` kecuali FAILED.
+2. S1: tidak lebih buruk signifikan vs statis; flap ≈ 0.
+3. S7: flap/jam dengan N3 jauh < tanpa N3 dengan tambahan delay yang terukur (bukan nol).
+4. N1–N4 masing-masing lolos ablasi pada metriknya sendiri.
+5. Overhead `O(1)` per paket di data plane (hanya enforcement), `O(N)` per siklus di control plane; waktu respons `< 2·T_probe + API`.
+
+Kegagalan apa pun wajib dilaporkan sebagai batasan — itu justru yang membuat paper dipercaya reviewer.
